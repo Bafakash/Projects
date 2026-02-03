@@ -1,0 +1,49 @@
+  name: Deploy Offline PWA to GitHub Pages
+
+  on:
+    push:
+      branches: ["main"]
+    workflow_dispatch:
+
+  permissions:
+    contents: read
+    pages: write
+    id-token: write
+
+  concurrency:
+    group: "pages"
+    cancel-in-progress: true
+
+  jobs:
+    deploy:
+      runs-on: ubuntu-latest
+      environment:
+        name: github-pages
+        url: ${{ steps.deployment.outputs.page_url }}
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
+
+        - name: Build Pages folder
+          run: |
+            set -euo pipefail
+            rm -rf dist
+            mkdir -p dist
+            cp -R offline/. dist/
+            # Avoid Jekyll interfering with PWA asset extensions.
+            touch dist/.nojekyll
+
+            # Optional: ship APKs alongside the PWA (download from /downloads/*).
+            mkdir -p dist/downloads
+            if [ -f "static/downloads/SafeScanOffline.apk" ]; then cp "static/downloads/SafeScanOffline.apk" "dist/downloads/SafeScanOffline.apk"; fi
+            if [ -f "static/downloads/SafeScan.apk" ]; then cp "static/downloads/SafeScan.apk" "dist/downloads/SafeScan.apk"; fi
+
+        - name: Upload Pages artifact
+          uses: actions/upload-pages-artifact@v3
+          with:
+            path: dist
+
+        - name: Deploy to GitHub Pages
+          id: deployment
+          uses: actions/deploy-pages@v4
+
