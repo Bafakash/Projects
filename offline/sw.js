@@ -1,6 +1,6 @@
 /* Offline service worker for SafeScan (static build). */
 
-const CACHE_NAME = "safescan-offline-v1";
+const CACHE_NAME = "safescan-offline-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -38,6 +38,12 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+
+  // APK should always come from the network so users do not get a stale binary.
+  if (url.pathname.endsWith(".apk")) {
+    event.respondWith(fetch(new Request(event.request, { cache: "no-store" })));
+    return;
+  }
 
   // Network-first so updates ship immediately after a deploy (while still working offline).
   event.respondWith(

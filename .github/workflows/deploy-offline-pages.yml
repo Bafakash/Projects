@@ -33,10 +33,26 @@
             # Avoid Jekyll interfering with PWA asset extensions.
             touch dist/.nojekyll
 
-            # Optional: ship APKs alongside the PWA (download from /downloads/*).
+            # Optional: ship APK alongside the PWA (download from /downloads/*).
+            # Use one canonical APK and mirror the legacy filename for compatibility.
             mkdir -p dist/downloads
-            if [ -f "static/downloads/SafeScanOffline.apk" ]; then cp "static/downloads/SafeScanOffline.apk" "dist/downloads/SafeScanOffline.apk"; fi
-            if [ -f "static/downloads/SafeScan.apk" ]; then cp "static/downloads/SafeScan.apk" "dist/downloads/SafeScan.apk"; fi
+            APK_SOURCE=""
+            if [ -f "static/downloads/SafeScan.apk" ]; then
+              APK_SOURCE="static/downloads/SafeScan.apk"
+            elif [ -f "static/downloads/SafeScanOffline.apk" ]; then
+              APK_SOURCE="static/downloads/SafeScanOffline.apk"
+            fi
+
+            if [ -n "$APK_SOURCE" ]; then
+              cp "$APK_SOURCE" "dist/downloads/SafeScan.apk"
+              cp "$APK_SOURCE" "dist/downloads/SafeScanOffline.apk"
+            fi
+
+            # Cache-bust APK link on each deploy to avoid stale browser downloads.
+            if [ -f "dist/index.html" ]; then
+              sed -i "s|downloads/SafeScan.apk|downloads/SafeScan.apk?v=${GITHUB_SHA}|g" dist/index.html
+              sed -i "s|downloads/SafeScanOffline.apk|downloads/SafeScan.apk?v=${GITHUB_SHA}|g" dist/index.html
+            fi
 
         - name: Upload Pages artifact
           uses: actions/upload-pages-artifact@v3
@@ -46,4 +62,3 @@
         - name: Deploy to GitHub Pages
           id: deployment
           uses: actions/deploy-pages@v4
-
