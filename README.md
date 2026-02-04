@@ -109,8 +109,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\update_apk.ps1
 
 This script will:
 - find the newest `*unsigned.apk` in your Downloads folder
-- sign it with your local Android debug keystore
+- align + sign it with `zipalign`/`apksigner` using your local Android debug keystore
 - replace `static/downloads/SafeScan.apk` and `static/downloads/SafeScanOffline.apk`
+
+If `apksigner` is missing, install Android SDK Build-Tools (for example `34.0.0`).
 
 ## Offline Android App (No Domain Needed)
 
