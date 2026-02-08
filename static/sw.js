@@ -1,7 +1,7 @@
 /* Minimal service worker to make the app installable (PWA) on Android.
    This caches the app shell (GET requests only). Scans still require network. */
 
-const CACHE_NAME = "safescan-v3";
+const CACHE_NAME = "safescan-v4";
 const APP_SHELL = [
   "/",
   "/download",

@@ -1,6 +1,6 @@
 /* Offline service worker for SafeScan (static build). */
 
-const CACHE_NAME = "safescan-offline-v4";
+const CACHE_NAME = "safescan-offline-v5";
 const APP_SHELL = [
   "./",
   "./index.html",

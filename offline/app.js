@@ -144,6 +144,40 @@
     "أهلا"
   ]);
 
+  const APPOINTMENT_HINTS_EN = new Set([
+    "appointment",
+    "meeting",
+    "schedule",
+    "scheduled",
+    "calendar",
+    "agenda",
+    "invite",
+    "invitation",
+    "team"
+  ]);
+
+  // Keep these in normalized Arabic form to match cleanText output.
+  const APPOINTMENT_HINTS_AR = new Set([
+    "\u0645\u0648\u0639\u062f", // موعد
+    "\u0627\u062c\u062a\u0645\u0627\u0639", // اجتماع
+    "\u0627\u0644\u0627\u062c\u062a\u0645\u0627\u0639", // الاجتماع
+    "\u0641\u0631\u064a\u0642", // فريق
+    "\u0627\u0644\u0639\u0645\u0644", // العمل
+    "\u062c\u062f\u0648\u0644", // جدول
+    "\u0627\u0644\u0627\u0639\u0645\u0627\u0644", // الاعمال
+    "\u0645\u0646\u0635\u0647", // منصه
+    "\u0646\u0642\u0627\u0634", // نقاش
+    "\u0627\u0644\u0633\u0627\u0639\u0647", // الساعه
+    "\u0635\u0628\u0627\u062d\u0627", // صباحا
+    "\u0645\u0633\u0627\u0621" // مساء
+  ]);
+
+  const BENIGN_WEAK_ALLOWED_KEYWORDS = new Set([
+    "confirm",
+    "\u062a\u0627\u0643\u064a\u062f", // تاكيد
+    "\u062a\u0623\u0643\u064a\u062f" // تأكيد
+  ]);
+
   function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
   }
@@ -854,6 +888,12 @@
       if (tokens.has(String(kw).toLowerCase())) benignHits += 1;
     }
 
+    const appointmentSet = isProbablyArabic(text) ? APPOINTMENT_HINTS_AR : APPOINTMENT_HINTS_EN;
+    let appointmentHits = 0;
+    for (const kw of appointmentSet) {
+      if (tokens.has(String(kw).toLowerCase())) appointmentHits += 1;
+    }
+
     const strings = ui(lang);
     const reasons = [];
     const detected = isProbablyArabic(text) ? "ar" : "en";
@@ -881,16 +921,28 @@
       riskScore += Math.min(35, boost);
     }
 
-    if (benignHits >= 2 && (!urls || !urls.length) && !foundKeywords.size) {
+    const weakKeywordsOnlyBenign =
+      weakKeywords.size > 0 &&
+      Array.from(weakKeywords).every((kw) => BENIGN_WEAK_ALLOWED_KEYWORDS.has(String(kw).toLowerCase()));
+    const hasOnlyWeakOrNone = strongKeywords.size === 0 && (!foundKeywords.size || weakKeywordsOnlyBenign);
+
+    if (appointmentHits >= 2 && (!urls || !urls.length) && hasOnlyWeakOrNone) {
       reasons.push(
         lang === "ar"
           ? "يبدو النص عاديًا (شكر/تأكيد/تواصل) ولا يحتوي على روابط."
           : "Text looks benign (thanks/confirmation/contact) and contains no links."
       );
+      riskScore -= 42;
+    } else if (benignHits >= 2 && (!urls || !urls.length) && hasOnlyWeakOrNone) {
+      reasons.push(
+        lang === "ar"
+          ? "ÙŠØ¨Ø¯Ùˆ Ø§Ù„Ù†Øµ Ø¹Ø§Ø¯ÙŠÙ‹Ø§ (Ø´ÙƒØ±/ØªØ£ÙƒÙŠØ¯/ØªÙˆØ§ØµÙ„) ÙˆÙ„Ø§ ÙŠØ­ØªÙˆÙŠ Ø¹Ù„Ù‰ Ø±ÙˆØ§Ø¨Ø·."
+          : "Text looks benign (thanks/confirmation/contact) and contains no links."
+      );
       riskScore -= 18;
     }
 
-    if (tokenArr.length <= 3 && (!urls || !urls.length) && !foundKeywords.size) {
+    if (tokenArr.length <= 3 && (!urls || !urls.length) && hasOnlyWeakOrNone) {
       riskScore -= 10;
     }
 

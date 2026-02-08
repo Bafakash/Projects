@@ -123,6 +123,41 @@ BENIGN_HINTS_AR = {
     "أهلا",
 }
 
+APPOINTMENT_HINTS_EN = {
+    "appointment",
+    "meeting",
+    "schedule",
+    "scheduled",
+    "calendar",
+    "agenda",
+    "invite",
+    "invitation",
+    "team",
+}
+
+# Keep these in normalized Arabic form to match `clean_text` output.
+APPOINTMENT_HINTS_AR = {
+    "موعد",
+    "اجتماع",
+    "الاجتماع",
+    "فريق",
+    "العمل",
+    "جدول",
+    "الاعمال",
+    "منصه",
+    "نقاش",
+    "الساعه",
+    "صباحا",
+    "مساء",
+}
+
+# These weak keywords can appear in legitimate scheduling/confirmation messages.
+BENIGN_WEAK_ALLOWED_KEYWORDS = {
+    "confirm",
+    "تاكيد",
+    "تأكيد",
+}
+
 TRANSLATIONS = {
     "en": {
         "title": "SafeScan • Message & URL Safety Checker",
@@ -443,6 +478,12 @@ def _analyze_text(text: str, urls: list, ui: dict, lang: str):
         if (kw or "").lower() in tokens:
             benign_hits += 1
 
+    appointment_hits = 0
+    appointment_set = APPOINTMENT_HINTS_AR if is_probably_arabic(text) else APPOINTMENT_HINTS_EN
+    for kw in appointment_set:
+        if (kw or "").lower() in tokens:
+            appointment_hits += 1
+
     reasons = []
     detected = "ar" if is_probably_arabic(text) else "en"
     if lang == "ar":
@@ -483,15 +524,31 @@ def _analyze_text(text: str, urls: list, ui: dict, lang: str):
 
         risk_score += min(35.0, boost)
 
-    # If we see clear benign intent (and no URLs / suspicious keywords), lower the risk a bit.
-    if benign_hits >= 2 and (not urls) and (not found_keywords):
+    weak_keywords_only_benign = bool(weak_keywords) and all(
+        (kw or "").lower() in BENIGN_WEAK_ALLOWED_KEYWORDS for kw in weak_keywords
+    )
+    has_only_weak_or_none = (not strong_keywords) and ((not found_keywords) or weak_keywords_only_benign)
+
+    # Meeting/appointment context without strong phishing signals should strongly reduce risk.
+    if appointment_hits >= 2 and (not urls) and has_only_weak_or_none:
+        reasons.append(
+            (
+                "يبدو النص متعلقًا بموعد/اجتماع عمل ولا يحتوي على روابط."
+                if lang == "ar"
+                else "Text appears to be a meeting/appointment message without links."
+            )
+        )
+        risk_score -= 42.0
+
+    # If we see clear benign intent (and no URLs / strong suspicious keywords), lower the risk.
+    elif benign_hits >= 2 and (not urls) and has_only_weak_or_none:
         reasons.append(
             ("يبدو النص عاديًا (شكر/تأكيد/تواصل) ولا يحتوي على روابط." if lang == "ar" else "Text looks benign (thanks/confirmation/contact) and contains no links.")
         )
         risk_score -= 18.0
 
     # Very short text with no signals should not be rated risky.
-    if len(tokens) <= 3 and (not urls) and (not found_keywords):
+    if len(tokens) <= 3 and (not urls) and has_only_weak_or_none:
         risk_score -= 10.0
 
     # Model explainability (top risk terms) for caution/unsafe results.
