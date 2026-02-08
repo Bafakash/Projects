@@ -19,6 +19,14 @@ DOMAIN_SUSPICIOUS_WORDS = [
     "bank",
     "wallet",
     "otp",
+    "free",
+    "premium",
+    "bonus",
+    "gift",
+    "reward",
+    "claim",
+    "winner",
+    "win",
 ]
 
 PATH_SUSPICIOUS_WORDS = [
@@ -47,6 +55,13 @@ PATH_SUSPICIOUS_WORDS = [
     "recover",
     "urgent",
     "alert",
+    "free",
+    "premium",
+    "gift",
+    "bonus",
+    "claim",
+    "winner",
+    "win",
 ]
 
 EXPLICIT_PHISHING_TOKENS = {
@@ -74,6 +89,11 @@ RISKY_TLDS = {
     "tk",
     "monster",
     "work",
+    "buzz",
+    "rest",
+    "fit",
+    "gq",
+    "country",
 }
 
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
@@ -86,6 +106,29 @@ BRAND_ALLOWLIST = {
     "apple": {"apple.com", "icloud.com"},
     "amazon": {"amazon.com", "amazon.co.uk", "amazon.ae"},
     "netflix": {"netflix.com"},
+}
+
+AUTH_TERMS = {
+    "login",
+    "signin",
+    "verify",
+    "account",
+    "password",
+    "secure",
+    "security",
+    "update",
+}
+
+INCENTIVE_TERMS = {
+    "free",
+    "premium",
+    "gift",
+    "bonus",
+    "prize",
+    "reward",
+    "winner",
+    "win",
+    "claim",
 }
 
 
@@ -187,7 +230,7 @@ def check_url(raw_url: str):
 
     hyphen_count = domain.count("-")
     if hyphen_count >= 3:
-        risk += 15
+        risk += 20
         reasons.append({"code": "MANY_HYPHENS", "value": str(hyphen_count)})
 
     # Length-based signals
@@ -202,7 +245,7 @@ def check_url(raw_url: str):
     parts = domain.split(".")
     tld = parts[-1] if len(parts) > 1 else ""
     if tld and tld in RISKY_TLDS:
-        risk += 14
+        risk += 18
         reasons.append({"code": "RISKY_TLD", "value": tld})
 
     # URL shorteners hide destination
@@ -224,6 +267,10 @@ def check_url(raw_url: str):
         # Multiple sensitive keywords in one domain is a strong phishing signal.
         risk += 18
         reasons.append({"code": "MULTIPLE_SUSPICIOUS_KEYWORDS", "value": str(len(domain_keyword_hits))})
+
+    if len(domain_keyword_hits) >= 3:
+        risk += 15
+        reasons.append({"code": "SUSPICIOUS_WORD_CLUSTER", "value": str(len(domain_keyword_hits))})
 
     path_query = " ".join(
         [
@@ -249,6 +296,14 @@ def check_url(raw_url: str):
             {"code": "MULTIPLE_SUSPICIOUS_PATH_KEYWORDS", "value": str(len(path_keyword_hits))}
         )
 
+    domain_parts_text = re.sub(r"[^a-z0-9]+", " ", domain)
+    domain_tokens = {t for t in domain_parts_text.split() if t}
+    has_auth_term = any(t in domain_tokens for t in AUTH_TERMS)
+    has_incentive_term = any(t in domain_tokens for t in INCENTIVE_TERMS)
+    if has_auth_term and has_incentive_term:
+        risk += 22
+        reasons.append({"code": "INCENTIVE_AUTH_COMBO"})
+
     if any(token in domain or token in path_query for token in EXPLICIT_PHISHING_TOKENS):
         risk += 60
         reasons.append({"code": "EXPLICIT_PHISHING_TERM"})
@@ -258,6 +313,9 @@ def check_url(raw_url: str):
         if brand in domain and not any(domain == sfx or domain.endswith("." + sfx) for sfx in allowed_suffixes):
             risk += 35
             reasons.append({"code": "BRAND_IMPERSONATION", "value": brand})
+            if has_auth_term or has_incentive_term:
+                risk += 18
+                reasons.append({"code": "BRAND_WITH_RISK_TERMS", "value": brand})
 
     risk = _clamp(risk, 0, 100)
 

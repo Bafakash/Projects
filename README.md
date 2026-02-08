@@ -32,6 +32,18 @@ python export_offline_model.py
 `train.py` now loads and merges both datasets automatically:
 - `messages.csv` (`text`,`label`)
 - `spam/spam.csv` (`v1`,`v2` with `ham/spam`)
+- `spam/arabic_expanded.csv` (large Arabic safe/unsafe set)
+- `URL dataset.csv` (`url`,`type`) and `Phishing URLs.csv` (`url`,`Type`)
+
+`train.py` trains and evaluates multiple algorithms:
+- Logistic Regression (baseline + offline export compatibility)
+- Decision Tree
+- Random Forest
+- MLP Neural Network
+
+It also saves:
+- `ensemble_models.pkl` (weighted ensemble bundle used by Flask app)
+- `training_report.json` (validation metrics and source stats)
 
 Optional: TensorFlow model (experiment / ensemble):
 

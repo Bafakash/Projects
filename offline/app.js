@@ -18,7 +18,8 @@
 
   const AR_LETTER_RE = /[\u0600-\u06FF]/;
   const AR_DIACRITICS_RE = /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]/g;
-  const URL_RE = /(https?:\/\/\S+|www\.\S+)/gi;
+  const URL_RE =
+    /(https?:\/\/[^\s<>"]+|www\.[^\s<>"]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/[^\s<>"]*)?)/gi;
   const EMAIL_RE = /\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b/g;
 
   const AR_STOPWORDS = new Set([
@@ -113,6 +114,40 @@
     "اربح"
   ]);
 
+  const SUSPICIOUS_PHRASES_EN = new Set([
+    "give me your password",
+    "share your password",
+    "send your password",
+    "verify your account now",
+    "click this link now",
+    "enter your otp",
+    "send otp code",
+    "urgent account verification",
+    "account will be suspended",
+    "bank account locked",
+    "claim your free prize",
+    "reset your password now"
+  ]);
+
+  const SUSPICIOUS_PHRASES_AR = new Set([
+    "اعطني كلمة المرور",
+    "اعطيني كلمة المرور",
+    "ارسل كلمة المرور",
+    "أرسل كلمة المرور",
+    "ارسل رمز التحقق",
+    "أرسل رمز التحقق",
+    "شارك رمز التحقق",
+    "تحقق من حسابك الآن",
+    "اضغط على الرابط الآن",
+    "انقر على الرابط الآن",
+    "سيتم ايقاف حسابك",
+    "سيتم إيقاف حسابك",
+    "حسابك مهدد",
+    "تحديث بياناتك البنكية",
+    "ادخل رقم البطاقة",
+    "أدخل رقم البطاقة"
+  ]);
+
   const BENIGN_HINTS_EN = new Set([
     "thank",
     "thanks",
@@ -203,10 +238,79 @@
     return s;
   }
 
+  function splitTokenParts(value) {
+    const parts = String(value || "")
+      .toLowerCase()
+      .split(/[^a-z0-9\u0600-\u06FF]+/g)
+      .filter((p) => p && p.length > 1);
+    return parts;
+  }
+
+  function urlFeatureTokens(rawUrl) {
+    const input = String(rawUrl || "").trim();
+    if (!input) return [];
+
+    const normalized = /^https?:\/\//i.test(input) ? input : `http://${input}`;
+    let parsed;
+    try {
+      parsed = new URL(normalized);
+    } catch {
+      return [];
+    }
+
+    const tokens = [];
+    const scheme = String(parsed.protocol || "").replace(":", "").toLowerCase();
+    if (scheme) tokens.push(`url_${scheme}`);
+
+    const host = String(parsed.hostname || "").toLowerCase().replace(/\.+$/, "");
+    if (host) {
+      tokens.push(...splitTokenParts(host));
+
+      const labels = host.split(".").filter(Boolean);
+      if (labels.length) tokens.push(`tld_${labels[labels.length - 1]}`);
+      if ((host.match(/-/g) || []).length >= 2) tokens.push("hyphen_domain");
+      if ((host.match(/\./g) || []).length >= 3) tokens.push("many_subdomains");
+    }
+
+    const pathBlob = `${parsed.pathname || ""} ${parsed.search || ""} ${parsed.hash || ""}`;
+    tokens.push(...splitTokenParts(pathBlob));
+
+    const seen = new Set();
+    const out = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+      if (out.length >= 20) break;
+    }
+    return out;
+  }
+
+  function replaceUrlMatch(matchText) {
+    const raw = String(matchText || "");
+    const tokens = urlFeatureTokens(raw);
+    if (!tokens.length) return " URLTOKEN ";
+    return ` URLTOKEN ${tokens.join(" ")} `;
+  }
+
+  function replaceEmailMatch(matchText) {
+    const email = String(matchText || "").trim().toLowerCase();
+    const at = email.indexOf("@");
+    const domain = at >= 0 ? email.slice(at + 1) : "";
+    const tokens = splitTokenParts(domain);
+    if (domain) {
+      const labels = domain.split(".").filter(Boolean);
+      if (labels.length) tokens.push(`mail_tld_${labels[labels.length - 1]}`);
+    }
+    if (!tokens.length) return " EMAILTOKEN ";
+    return ` EMAILTOKEN ${tokens.slice(0, 10).join(" ")} `;
+  }
+
   function cleanText(text) {
     let s = String(text || "");
-    s = s.replace(URL_RE, " URLTOKEN ");
-    s = s.replace(EMAIL_RE, " EMAILTOKEN ");
+    s = s.replace(EMAIL_RE, (m) => replaceEmailMatch(m));
+    s = s.replace(URL_RE, (m) => replaceUrlMatch(m));
 
     if (isProbablyArabic(s)) s = normalizeArabic(s);
     s = s.toLowerCase();
@@ -351,7 +455,15 @@
     "payment",
     "bank",
     "wallet",
-    "otp"
+    "otp",
+    "free",
+    "premium",
+    "bonus",
+    "gift",
+    "reward",
+    "claim",
+    "winner",
+    "win"
   ];
 
   const PATH_SUSPICIOUS_WORDS = [
@@ -379,13 +491,35 @@
     "unlock",
     "recover",
     "urgent",
-    "alert"
+    "alert",
+    "free",
+    "premium",
+    "gift",
+    "bonus",
+    "claim",
+    "winner",
+    "win"
   ];
 
   const EXPLICIT_PHISHING_TOKENS = new Set(["phish", "phishing"]);
 
   const URL_SHORTENERS = new Set(["bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "cutt.ly", "rebrand.ly"]);
-  const RISKY_TLDS = new Set(["xyz", "top", "icu", "site", "click", "live", "tk", "monster", "work"]);
+  const RISKY_TLDS = new Set([
+    "xyz",
+    "top",
+    "icu",
+    "site",
+    "click",
+    "live",
+    "tk",
+    "monster",
+    "work",
+    "buzz",
+    "rest",
+    "fit",
+    "gq",
+    "country"
+  ]);
   const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
   const BRAND_ALLOWLIST = {
     paypal: ["paypal.com", "paypal.me"],
@@ -395,6 +529,18 @@
     amazon: ["amazon.com", "amazon.co.uk", "amazon.ae"],
     netflix: ["netflix.com"]
   };
+
+  const AUTH_TERMS = new Set([
+    "login",
+    "signin",
+    "verify",
+    "account",
+    "password",
+    "secure",
+    "security",
+    "update"
+  ]);
+  const INCENTIVE_TERMS = new Set(["free", "premium", "gift", "bonus", "prize", "reward", "winner", "win", "claim"]);
 
   function round2(n) {
     return Math.round(n * 100) / 100;
@@ -444,10 +590,13 @@
       URL_SHORTENER: "URL shortener hides the destination.",
       SUSPICIOUS_KEYWORD: "Domain contains suspicious keyword: {value}",
       MULTIPLE_SUSPICIOUS_KEYWORDS: "Multiple suspicious keywords in domain ({value}).",
+      SUSPICIOUS_WORD_CLUSTER: "Domain contains a dense cluster of suspicious words ({value}).",
       SUSPICIOUS_PATH_KEYWORD: "Path/query contains suspicious keyword: {value}",
       MULTIPLE_SUSPICIOUS_PATH_KEYWORDS: "Multiple suspicious keywords in path/query ({value}).",
+      INCENTIVE_AUTH_COMBO: "Domain combines lure terms (free/prize) with account/login terms.",
       EXPLICIT_PHISHING_TERM: "Explicit phishing term detected in URL.",
       BRAND_IMPERSONATION: "Brand name used in domain (possible impersonation): {value}",
+      BRAND_WITH_RISK_TERMS: "Brand-like domain also includes high-risk lure/login terms: {value}",
       NO_MAJOR_FLAGS: "No major red flags detected."
     },
     ar: {
@@ -464,7 +613,10 @@
       URL_SHORTENER: "رابط مختصر يُخفي الوجهة.",
       SUSPICIOUS_KEYWORD: "يحتوي النطاق على كلمة مشبوهة: {value}",
       MULTIPLE_SUSPICIOUS_KEYWORDS: "وجود عدة كلمات مشبوهة في النطاق ({value}).",
+      SUSPICIOUS_WORD_CLUSTER: "النطاق يحتوي على تجمع كبير من الكلمات المشبوهة ({value}).",
+      INCENTIVE_AUTH_COMBO: "يجمع النطاق بين كلمات إغراء (مجاني/جائزة) وكلمات حساب/تسجيل دخول.",
       BRAND_IMPERSONATION: "يحتوي النطاق على اسم علامة تجارية وقد يكون انتحالًا: {value}",
+      BRAND_WITH_RISK_TERMS: "النطاق المشابه للعلامة يحتوي أيضًا على كلمات إغراء/تسجيل دخول خطرة: {value}",
       NO_MAJOR_FLAGS: "لا توجد مؤشرات كبيرة على الخطر."
     }
   };
@@ -647,7 +799,7 @@
 
     const hyphenCount = (domain.match(/-/g) || []).length;
     if (hyphenCount >= 3) {
-      risk += 15;
+      risk += 20;
       reasons.push({ code: "MANY_HYPHENS", value: String(hyphenCount) });
     }
 
@@ -662,7 +814,7 @@
     const parts = domain.split(".");
     const tld = parts.length > 1 ? parts[parts.length - 1] : "";
     if (tld && RISKY_TLDS.has(tld)) {
-      risk += 14;
+      risk += 18;
       reasons.push({ code: "RISKY_TLD", value: tld });
     }
 
@@ -689,6 +841,11 @@
       reasons.push({ code: "MULTIPLE_SUSPICIOUS_KEYWORDS", value: String(domainKeywordHits.length) });
     }
 
+    if (domainKeywordHits.length >= 3) {
+      risk += 15;
+      reasons.push({ code: "SUSPICIOUS_WORD_CLUSTER", value: String(domainKeywordHits.length) });
+    }
+
     const pathQuery = [
       safeDecode(parsed.pathname),
       safeDecode(parsed.search),
@@ -713,6 +870,14 @@
     if (pathKeywordHits.length >= 2) {
       risk += 12;
       reasons.push({ code: "MULTIPLE_SUSPICIOUS_PATH_KEYWORDS", value: String(pathKeywordHits.length) });
+    }
+
+    const domainTokens = new Set(domain.replace(/[^a-z0-9]+/g, " ").split(" ").filter(Boolean));
+    const hasAuthTerm = Array.from(AUTH_TERMS).some((t) => domainTokens.has(t));
+    const hasIncentiveTerm = Array.from(INCENTIVE_TERMS).some((t) => domainTokens.has(t));
+    if (hasAuthTerm && hasIncentiveTerm) {
+      risk += 22;
+      reasons.push({ code: "INCENTIVE_AUTH_COMBO" });
     }
 
     let hasExplicitPhishing = false;
@@ -742,6 +907,10 @@
       if (!ok) {
         risk += 35;
         reasons.push({ code: "BRAND_IMPERSONATION", value: brand });
+        if (hasAuthTerm || hasIncentiveTerm) {
+          risk += 18;
+          reasons.push({ code: "BRAND_WITH_RISK_TERMS", value: brand });
+        }
       }
     }
 
@@ -846,6 +1015,15 @@
     return z / (1 + z);
   }
 
+  function urlNlpRisk(urlText) {
+    const x = buildVector(urlText);
+    const coef = MODEL.model.coef;
+    const intercept = MODEL.model.intercept;
+    let score = intercept;
+    for (let i = 0; i < x.length; i++) score += coef[i] * x[i];
+    return round2(clamp(sigmoid(score) * 100, 0, 100));
+  }
+
   function analyzeText(text, urls, lang) {
     const x = buildVector(text);
     const coef = MODEL.model.coef;
@@ -910,6 +1088,20 @@
       reasons.push(lang === "ar" ? `تم العثور على ${urls.length} رابط/روابط في النص.` : `Found ${urls.length} URL(s) in the text.`);
     }
 
+    const phraseSet = detected === "ar" ? SUSPICIOUS_PHRASES_AR : SUSPICIOUS_PHRASES_EN;
+    const haystack = `${String(text || "").toLowerCase()} ${cleaned}`;
+    const phraseHits = [];
+    for (const phrase of phraseSet) {
+      if (haystack.includes(String(phrase).toLowerCase())) phraseHits.push(phrase);
+    }
+    if (phraseHits.length) {
+      const shown = Array.from(new Set(phraseHits)).slice(0, 6).join(", ");
+      reasons.push(
+        lang === "ar" ? `عبارات خطرة مكتشفة: ${shown}` : `Detected high-risk phrases: ${shown}`
+      );
+      riskScore += Math.min(40, 14 + 7 * phraseHits.length);
+    }
+
     if (foundKeywords.size) {
       const keywords = Array.from(foundKeywords).sort().join(", ");
       reasons.push(lang === "ar" ? `كلمات/عبارات مشبوهة: ${keywords}` : `Suspicious keywords: ${keywords}`);
@@ -924,22 +1116,23 @@
     const weakKeywordsOnlyBenign =
       weakKeywords.size > 0 &&
       Array.from(weakKeywords).every((kw) => BENIGN_WEAK_ALLOWED_KEYWORDS.has(String(kw).toLowerCase()));
-    const hasOnlyWeakOrNone = strongKeywords.size === 0 && (!foundKeywords.size || weakKeywordsOnlyBenign);
+    const hasOnlyWeakOrNone =
+      strongKeywords.size === 0 && (!foundKeywords.size || weakKeywordsOnlyBenign) && phraseHits.length === 0;
 
     if (appointmentHits >= 2 && (!urls || !urls.length) && hasOnlyWeakOrNone) {
+      reasons.push(
+        lang === "ar"
+          ? "يبدو النص متعلقًا بموعد/اجتماع عمل ولا يحتوي على روابط."
+          : "Text appears to be a meeting/appointment message without links."
+      );
+      riskScore -= 46;
+    } else if (benignHits >= 2 && (!urls || !urls.length) && hasOnlyWeakOrNone) {
       reasons.push(
         lang === "ar"
           ? "يبدو النص عاديًا (شكر/تأكيد/تواصل) ولا يحتوي على روابط."
           : "Text looks benign (thanks/confirmation/contact) and contains no links."
       );
-      riskScore -= 42;
-    } else if (benignHits >= 2 && (!urls || !urls.length) && hasOnlyWeakOrNone) {
-      reasons.push(
-        lang === "ar"
-          ? "ÙŠØ¨Ø¯Ùˆ Ø§Ù„Ù†Øµ Ø¹Ø§Ø¯ÙŠÙ‹Ø§ (Ø´ÙƒØ±/ØªØ£ÙƒÙŠØ¯/ØªÙˆØ§ØµÙ„) ÙˆÙ„Ø§ ÙŠØ­ØªÙˆÙŠ Ø¹Ù„Ù‰ Ø±ÙˆØ§Ø¨Ø·."
-          : "Text looks benign (thanks/confirmation/contact) and contains no links."
-      );
-      riskScore -= 18;
+      riskScore -= 22;
     }
 
     if (tokenArr.length <= 3 && (!urls || !urls.length) && hasOnlyWeakOrNone) {
@@ -1020,9 +1213,24 @@
     if (isUrlOnly) {
       const candidate = stripUrlPunctuation(input);
       const rep = checkUrl(candidate, lang);
-      const resultClass = rep.result_class;
-      const confidence = rep.risk;
-      const message = translateUrlMessage(rep.messageKey, lang);
+      const mlRisk = urlNlpRisk(candidate);
+      const blendedRisk =
+        mlRisk >= RISK_CAUTION_MIN
+          ? Math.max(Number(rep.risk || 0), Number(rep.risk || 0) * 0.65 + mlRisk * 0.35)
+          : Math.max(Number(rep.risk || 0), mlRisk * 0.4);
+      const confidence = round2(clamp(blendedRisk, 0, 100));
+      const resultClass = riskClass(confidence);
+      let messageKey = rep.messageKey;
+      if (resultClass === "unsafe") messageKey = "High risk URL";
+      else if (resultClass === "caution") messageKey = "Suspicious URL";
+      else if (!messageKey) messageKey = "URL looks safe";
+      const message = translateUrlMessage(messageKey, lang);
+      const reasons = Array.isArray(rep.reasons) ? [...rep.reasons] : [];
+      reasons.push(
+        lang === "ar"
+          ? `احتمال الخطورة عبر نموذج URL/NLP: ${mlRisk}%`
+          : `URL NLP phishing probability: ${mlRisk}%`
+      );
 
       return {
         kind: "url",
@@ -1041,7 +1249,7 @@
             label: strings[resultClass],
             confidence,
             message,
-            reasons: rep.reasons || []
+            reasons
           }
         ]
       };
@@ -1055,19 +1263,37 @@
     for (let i = 0; i < urls.length; i++) {
       const candidate = urls[i];
       const rep = checkUrl(candidate, lang);
-      const resultClass = rep.result_class;
-      urlRisks.push(Number(rep.risk || 0));
+      const mlRisk = urlNlpRisk(candidate);
+      const blendedRisk =
+        mlRisk >= RISK_CAUTION_MIN
+          ? Math.max(Number(rep.risk || 0), Number(rep.risk || 0) * 0.65 + mlRisk * 0.35)
+          : Math.max(Number(rep.risk || 0), mlRisk * 0.4);
+      const confidence = round2(clamp(blendedRisk, 0, 100));
+      const resultClass = riskClass(confidence);
+      urlRisks.push(Number(confidence || 0));
       if (resultClass === "unsafe") urlsUnsafe += 1;
       else if (resultClass === "caution") urlsCaution += 1;
+
+      let messageKey = rep.messageKey;
+      if (resultClass === "unsafe") messageKey = "High risk URL";
+      else if (resultClass === "caution") messageKey = "Suspicious URL";
+      else if (!messageKey) messageKey = "URL looks safe";
+
+      const reasons = Array.isArray(rep.reasons) ? [...rep.reasons] : [];
+      reasons.push(
+        lang === "ar"
+          ? `احتمال الخطورة عبر نموذج URL/NLP: ${mlRisk}%`
+          : `URL NLP phishing probability: ${mlRisk}%`
+      );
 
       urlDetails.push({
         url: candidate,
         result_class: resultClass,
         icon: resultClass === "safe" ? "✅" : "⚠️",
         label: strings[resultClass],
-        confidence: rep.risk,
-        message: translateUrlMessage(rep.messageKey, lang),
-        reasons: rep.reasons || []
+        confidence,
+        message: translateUrlMessage(messageKey, lang),
+        reasons
       });
     }
 

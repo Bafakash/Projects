@@ -13,9 +13,59 @@ from preprocess import clean_text, is_probably_arabic
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 
-# Load NLP model correctly (joblib, NOT pickle)
+# Load baseline NLP model (backward-compatible artifacts).
 model = joblib.load("model.pkl")
 vectorizer = joblib.load("vectorizer.pkl")
+
+# Optional ensemble bundle created by train.py.
+ensemble_models = {}
+ensemble_weights = {}
+ensemble_svd = None
+
+if os.path.isfile("ensemble_models.pkl"):
+    try:
+        bundle = joblib.load("ensemble_models.pkl")
+        bundle_vectorizer = bundle.get("vectorizer")
+        if bundle_vectorizer is not None:
+            vectorizer = bundle_vectorizer
+
+        bundle_models = bundle.get("models", {})
+        if isinstance(bundle_models, dict):
+            for name, mdl in bundle_models.items():
+                if hasattr(mdl, "predict_proba"):
+                    ensemble_models[str(name)] = mdl
+
+        if "logreg" in ensemble_models:
+            model = ensemble_models["logreg"]
+
+        raw_weights = bundle.get("weights", {}) if isinstance(bundle, dict) else {}
+        if isinstance(raw_weights, dict):
+            for name, value in raw_weights.items():
+                try:
+                    ensemble_weights[str(name)] = float(value)
+                except Exception:
+                    continue
+
+        ensemble_svd = bundle.get("mlp_svd")
+    except Exception:
+        ensemble_models = {}
+        ensemble_weights = {}
+        ensemble_svd = None
+
+if not ensemble_models:
+    ensemble_models = {"logreg": model}
+
+if not ensemble_weights:
+    ensemble_weights = {name: 1.0 for name in ensemble_models}
+else:
+    missing = [n for n in ensemble_models if n not in ensemble_weights]
+    for n in missing:
+        ensemble_weights[n] = 1.0
+    total_weight = sum(max(0.0, float(v)) for v in ensemble_weights.values())
+    if total_weight <= 0:
+        ensemble_weights = {name: 1.0 for name in ensemble_models}
+    else:
+        ensemble_weights = {k: max(0.0, float(v)) / total_weight for k, v in ensemble_weights.items()}
 
 # Optional TensorFlow model (for experimentation / ensemble). Disabled by default.
 TF_MODEL_DIR = os.environ.get("SAFESCAN_TF_MODEL_DIR", "tf_model")
@@ -37,6 +87,19 @@ RISK_CAUTION_MIN = 55
 RISK_UNSAFE_MIN = 70
 APK_FILENAME = "SafeScan.apk"
 DOWNLOADS_DIR = os.path.join(app.root_path, "static", "downloads")
+
+MODEL_LABELS_EN = {
+    "logreg": "Logistic Regression",
+    "decision_tree": "Decision Tree",
+    "random_forest": "Random Forest",
+    "mlp": "MLP Neural Network",
+}
+MODEL_LABELS_AR = {
+    "logreg": "الانحدار اللوجستي",
+    "decision_tree": "شجرة القرار",
+    "random_forest": "الغابة العشوائية",
+    "mlp": "الشبكة العصبية MLP",
+}
 
 SUSPICIOUS_KEYWORDS_EN_STRONG = {
     "verify",
@@ -105,6 +168,40 @@ BENIGN_HINTS_EN = {
     "shipped",
     "report",
     "welcome",
+}
+
+SUSPICIOUS_PHRASES_EN = {
+    "give me your password",
+    "share your password",
+    "send your password",
+    "verify your account now",
+    "click this link now",
+    "enter your otp",
+    "send otp code",
+    "urgent account verification",
+    "account will be suspended",
+    "bank account locked",
+    "claim your free prize",
+    "reset your password now",
+}
+
+SUSPICIOUS_PHRASES_AR = {
+    "اعطني كلمة المرور",
+    "اعطيني كلمة المرور",
+    "ارسل كلمة المرور",
+    "أرسل كلمة المرور",
+    "ارسل رمز التحقق",
+    "أرسل رمز التحقق",
+    "شارك رمز التحقق",
+    "تحقق من حسابك الآن",
+    "اضغط على الرابط الآن",
+    "انقر على الرابط الآن",
+    "سيتم ايقاف حسابك",
+    "سيتم إيقاف حسابك",
+    "حسابك مهدد",
+    "تحديث بياناتك البنكية",
+    "ادخل رقم البطاقة",
+    "أدخل رقم البطاقة",
 }
 
 BENIGN_HINTS_AR = {
@@ -302,10 +399,13 @@ URL_REASON_TEMPLATES = {
         "URL_SHORTENER": "URL shortener hides the destination.",
         "SUSPICIOUS_KEYWORD": "Domain contains suspicious keyword: {value}",
         "MULTIPLE_SUSPICIOUS_KEYWORDS": "Multiple suspicious keywords in domain ({value}).",
+        "SUSPICIOUS_WORD_CLUSTER": "Domain contains a dense cluster of suspicious words ({value}).",
         "SUSPICIOUS_PATH_KEYWORD": "Path/query contains suspicious keyword: {value}",
         "MULTIPLE_SUSPICIOUS_PATH_KEYWORDS": "Multiple suspicious keywords in path/query ({value}).",
+        "INCENTIVE_AUTH_COMBO": "Domain combines lure terms (free/prize) with account/login terms.",
         "EXPLICIT_PHISHING_TERM": "Explicit phishing term detected in URL.",
         "BRAND_IMPERSONATION": "Brand name used in domain (possible impersonation): {value}",
+        "BRAND_WITH_RISK_TERMS": "Brand-like domain also includes high-risk lure/login terms: {value}",
         "NO_MAJOR_FLAGS": "No major red flags detected.",
     },
     "ar": {
@@ -324,10 +424,13 @@ URL_REASON_TEMPLATES = {
         "URL_SHORTENER": "رابط مختصر يُخفي الوجهة.",
         "SUSPICIOUS_KEYWORD": "يحتوي النطاق على كلمة مشبوهة: {value}",
         "MULTIPLE_SUSPICIOUS_KEYWORDS": "وجود عدة كلمات مشبوهة في النطاق ({value}).",
+        "SUSPICIOUS_WORD_CLUSTER": "النطاق يحتوي على تجمع كبير من الكلمات المشبوهة ({value}).",
         "SUSPICIOUS_PATH_KEYWORD": "يحتوي مسار/استعلام الرابط على كلمة مشبوهة: {value}",
         "MULTIPLE_SUSPICIOUS_PATH_KEYWORDS": "وجود عدة كلمات مشبوهة في مسار/استعلام الرابط ({value}).",
+        "INCENTIVE_AUTH_COMBO": "يجمع النطاق بين كلمات إغراء (مجاني/جائزة) وكلمات حساب/تسجيل دخول.",
         "EXPLICIT_PHISHING_TERM": "تم العثور على مصطلح تصيّد صريح داخل الرابط.",
         "BRAND_IMPERSONATION": "يحتوي النطاق على اسم علامة تجارية وقد يكون انتحالًا: {value}",
+        "BRAND_WITH_RISK_TERMS": "النطاق المشابه للعلامة يحتوي أيضًا على كلمات إغراء/تسجيل دخول خطرة: {value}",
         "NO_MAJOR_FLAGS": "لا توجد مؤشرات كبيرة على الخطر.",
     },
 }
@@ -432,14 +535,133 @@ def _extract_urls(text: str):
     return urls
 
 
+def _unsafe_probability(model_obj, X) -> float:
+    proba = model_obj.predict_proba(X)
+    classes = [int(c) for c in getattr(model_obj, "classes_", [0, 1])]
+    class_to_idx = {c: i for i, c in enumerate(classes)}
+    unsafe_idx = class_to_idx.get(1, 1 if proba.shape[1] > 1 else 0)
+    return float(proba[0][unsafe_idx])
+
+
+def _find_suspicious_phrase_hits(text: str, cleaned: str, arabic: bool) -> list[str]:
+    raw = str(text or "").lower()
+    haystack = f"{raw} {cleaned}"
+    phrase_set = SUSPICIOUS_PHRASES_AR if arabic else SUSPICIOUS_PHRASES_EN
+    hits = []
+    for phrase in phrase_set:
+        if phrase.lower() in haystack:
+            hits.append(phrase)
+    return sorted(set(hits))
+
+
+def _format_model_breakdown(model_probs: dict, lang: str) -> str:
+    if not model_probs:
+        return ""
+
+    labels = MODEL_LABELS_AR if lang == "ar" else MODEL_LABELS_EN
+    parts = []
+    for name, prob in model_probs.items():
+        label = labels.get(name, name)
+        parts.append(f"{label}: {round(float(prob) * 100.0, 2)}%")
+
+    if not parts:
+        return ""
+    if lang == "ar":
+        return "مخرجات النماذج: " + " | ".join(parts)
+    return "Model risks: " + " | ".join(parts)
+
+
+def _predict_text_ensemble(cleaned: str) -> dict:
+    X = vectorizer.transform([cleaned])
+
+    model_probs = {}
+    for name, mdl in ensemble_models.items():
+        try:
+            X_in = X
+            if name == "mlp" and ensemble_svd is not None:
+                X_in = ensemble_svd.transform(X)
+            model_probs[name] = _unsafe_probability(mdl, X_in)
+        except Exception:
+            continue
+
+    if not model_probs:
+        model_probs = {"logreg": _unsafe_probability(model, X)}
+
+    weighted = 0.0
+    wsum = 0.0
+    for name, prob in model_probs.items():
+        weight = float(ensemble_weights.get(name, 0.0))
+        if weight <= 0:
+            continue
+        weighted += weight * float(prob)
+        wsum += weight
+
+    if wsum <= 0:
+        prob_unsafe = sum(float(v) for v in model_probs.values()) / float(len(model_probs))
+    else:
+        prob_unsafe = weighted / wsum
+
+    return {
+        "X": X,
+        "prob_unsafe": float(prob_unsafe),
+        "model_probs": model_probs,
+    }
+
+
+def _evaluate_url_candidate(candidate: str, lang: str, ui: dict) -> dict:
+    _, report = check_url(candidate)
+    heuristic_risk_raw = report.get("risk", 100.0)
+    heuristic_risk = float(100.0 if heuristic_risk_raw is None else heuristic_risk_raw)
+    heuristic_class = _risk_class(heuristic_risk)
+
+    cleaned_url = clean_text(candidate)
+    ensemble_pred = _predict_text_ensemble(cleaned_url) if cleaned_url else {"prob_unsafe": 0.0, "model_probs": {}}
+    ml_risk = _clamp(float(ensemble_pred.get("prob_unsafe", 0.0)) * 100.0)
+
+    # Keep heuristics as anchor but let NLP URL knowledge raise clearly risky links.
+    if ml_risk >= RISK_CAUTION_MIN:
+        combined_risk = max(heuristic_risk, heuristic_risk * (1.0 - 0.35) + ml_risk * 0.35)
+    else:
+        combined_risk = max(heuristic_risk, ml_risk * 0.4)
+
+    combined_risk = _clamp(combined_risk, 0.0, 100.0)
+    result_class = _risk_class(combined_risk)
+
+    msg_key = report.get("message_key", "")
+    if result_class == "unsafe":
+        msg_key = "High risk URL"
+    elif result_class == "caution":
+        msg_key = "Suspicious URL"
+    elif not msg_key:
+        msg_key = "URL looks safe"
+
+    reasons = [_url_reason_text(r, lang) for r in (report.get("reasons") or [])]
+    if lang == "ar":
+        reasons.append(f"احتمال الخطورة عبر نموذج URL/NLP: {round(ml_risk, 2)}%")
+    else:
+        reasons.append(f"URL NLP phishing probability: {round(ml_risk, 2)}%")
+
+    model_breakdown = _format_model_breakdown(ensemble_pred.get("model_probs", {}), lang)
+    if model_breakdown:
+        reasons.append(model_breakdown)
+
+    return {
+        "risk": round(combined_risk, 2),
+        "result_class": result_class,
+        "message_key": msg_key,
+        "reasons": reasons,
+        "heuristic_class": heuristic_class,
+        "heuristic_risk": round(heuristic_risk, 2),
+        "ml_risk": round(ml_risk, 2),
+    }
+
+
 def _analyze_text(text: str, urls: list, ui: dict, lang: str):
     cleaned = clean_text(text)
-    X = vectorizer.transform([cleaned])
-    proba = model.predict_proba(X)[0]
-
-    class_to_idx = {int(c): i for i, c in enumerate(getattr(model, "classes_", [0, 1]))}
-    unsafe_idx = class_to_idx.get(1, 1 if len(proba) > 1 else 0)
-    prob_unsafe_sklearn = float(proba[unsafe_idx])
+    prediction = _predict_text_ensemble(cleaned)
+    X = prediction["X"]
+    prob_unsafe_ensemble = float(prediction["prob_unsafe"])
+    model_probs = prediction.get("model_probs", {})
 
     tf_prob_unsafe = None
     if tf_model is not None:
@@ -451,11 +673,11 @@ def _analyze_text(text: str, urls: list, ui: dict, lang: str):
         except Exception:
             tf_prob_unsafe = None
 
-    prob_unsafe = prob_unsafe_sklearn
+    prob_unsafe = prob_unsafe_ensemble
     if tf_prob_unsafe is not None:
-        prob_unsafe = (prob_unsafe_sklearn + tf_prob_unsafe) / 2.0
+        prob_unsafe = 0.8 * prob_unsafe_ensemble + 0.2 * tf_prob_unsafe
 
-    nlp_confidence = round(float(max(proba)) * 100, 2)
+    nlp_confidence = round(float(max(prob_unsafe, 1.0 - prob_unsafe)) * 100, 2)
     risk_score = prob_unsafe * 100.0
 
     tokens = set(cleaned.split())
@@ -486,13 +708,15 @@ def _analyze_text(text: str, urls: list, ui: dict, lang: str):
 
     reasons = []
     detected = "ar" if is_probably_arabic(text) else "en"
+
+    model_breakdown = _format_model_breakdown(model_probs, lang)
     if lang == "ar":
         reasons.append(f"اللغة المكتشفة: {'العربية' if detected == 'ar' else 'الإنجليزية'}")
         if tf_prob_unsafe is None:
             reasons.append(f"احتمال الخطر (NLP): {round(prob_unsafe * 100, 2)}%")
         else:
             reasons.append(
-                f"احتمال الخطر (NLP): {round(prob_unsafe * 100, 2)}% (سكيلرن: {round(prob_unsafe_sklearn * 100, 2)}% / TensorFlow: {round(tf_prob_unsafe * 100, 2)}%)"
+                f"احتمال الخطر (NLP): {round(prob_unsafe * 100, 2)}% (النسخة المجمعة: {round(prob_unsafe_ensemble * 100, 2)}% / TensorFlow: {round(tf_prob_unsafe * 100, 2)}%)"
             )
     else:
         reasons.append(f"Detected language: {'Arabic' if detected == 'ar' else 'English'}")
@@ -500,14 +724,28 @@ def _analyze_text(text: str, urls: list, ui: dict, lang: str):
             reasons.append(f"NLP risk probability: {round(prob_unsafe * 100, 2)}%")
         else:
             reasons.append(
-                f"NLP risk probability: {round(prob_unsafe * 100, 2)}% (scikit-learn: {round(prob_unsafe_sklearn * 100, 2)}% / TensorFlow: {round(tf_prob_unsafe * 100, 2)}%)"
+                f"NLP risk probability: {round(prob_unsafe * 100, 2)}% (ensemble: {round(prob_unsafe_ensemble * 100, 2)}% / TensorFlow: {round(tf_prob_unsafe * 100, 2)}%)"
             )
+    if model_breakdown:
+        reasons.append(model_breakdown)
 
     if urls:
         reasons.append(
             (f"تم العثور على {len(urls)} رابط/روابط في النص." if lang == "ar" else f"Found {len(urls)} URL(s) in the text.")
         )
         # URLs are checked separately; keep text risk based mainly on the text itself.
+
+    phrase_hits = _find_suspicious_phrase_hits(text, cleaned, arabic=(detected == "ar"))
+    if phrase_hits:
+        shown = ", ".join(phrase_hits[:6])
+        reasons.append(
+            (
+                f"عبارات خطرة مكتشفة: {shown}"
+                if lang == "ar"
+                else f"Detected high-risk phrases: {shown}"
+            )
+        )
+        risk_score += min(40.0, 14.0 + (7.0 * float(len(phrase_hits))))
 
     if found_keywords:
         keywords_sorted = ", ".join(sorted(found_keywords))
@@ -527,7 +765,7 @@ def _analyze_text(text: str, urls: list, ui: dict, lang: str):
     weak_keywords_only_benign = bool(weak_keywords) and all(
         (kw or "").lower() in BENIGN_WEAK_ALLOWED_KEYWORDS for kw in weak_keywords
     )
-    has_only_weak_or_none = (not strong_keywords) and ((not found_keywords) or weak_keywords_only_benign)
+    has_only_weak_or_none = (not strong_keywords) and ((not found_keywords) or weak_keywords_only_benign) and (not phrase_hits)
 
     # Meeting/appointment context without strong phishing signals should strongly reduce risk.
     if appointment_hits >= 2 and (not urls) and has_only_weak_or_none:
@@ -538,14 +776,14 @@ def _analyze_text(text: str, urls: list, ui: dict, lang: str):
                 else "Text appears to be a meeting/appointment message without links."
             )
         )
-        risk_score -= 42.0
+        risk_score -= 46.0
 
     # If we see clear benign intent (and no URLs / strong suspicious keywords), lower the risk.
     elif benign_hits >= 2 and (not urls) and has_only_weak_or_none:
         reasons.append(
             ("يبدو النص عاديًا (شكر/تأكيد/تواصل) ولا يحتوي على روابط." if lang == "ar" else "Text looks benign (thanks/confirmation/contact) and contains no links.")
         )
-        risk_score -= 18.0
+        risk_score -= 22.0
 
     # Very short text with no signals should not be rated risky.
     if len(tokens) <= 3 and (not urls) and has_only_weak_or_none:
@@ -756,17 +994,16 @@ def home():
 
         if is_url_only:
             candidate = _strip_url_punctuation(analysis_input)
-            _, report = check_url(candidate)
-            url_risk_raw = report.get("risk", 100.0)
-            url_risk = float(100.0 if url_risk_raw is None else url_risk_raw)
-            msg_key = report.get("message_key", "")
+            url_eval = _evaluate_url_candidate(candidate, lang, ui)
+            url_risk = float(url_eval.get("risk", 100.0))
+            msg_key = str(url_eval.get("message_key", ""))
 
             result_class = _risk_class(url_risk)
             result = ui.get(result_class, result_class)
             icon = "✅" if result_class == "safe" else "⚠️"
             confidence = round(url_risk, 2)
             message = _translate_url_message(msg_key, lang)
-            url_reasons = [_url_reason_text(r, lang) for r in (report.get("reasons") or [])]
+            url_reasons = list(url_eval.get("reasons", []))
 
             url_details = [
                 {
@@ -801,11 +1038,10 @@ def home():
             url_details = []
             url_risks = []
             for candidate in urls:
-                _, report = check_url(candidate)
-                url_risk_raw = report.get("risk", 100.0)
-                url_risk = float(100.0 if url_risk_raw is None else url_risk_raw)
+                url_eval = _evaluate_url_candidate(candidate, lang, ui)
+                url_risk = float(url_eval.get("risk", 100.0))
                 url_risks.append(url_risk)
-                msg_key = report.get("message_key", "")
+                msg_key = str(url_eval.get("message_key", ""))
 
                 url_result_class = _risk_class(url_risk)
                 if url_result_class == "unsafe":
@@ -821,7 +1057,7 @@ def home():
                         "icon": "✅" if url_result_class == "safe" else "⚠️",
                         "confidence": round(url_risk, 2),
                         "message": _translate_url_message(msg_key, lang),
-                        "reasons": [_url_reason_text(r, lang) for r in (report.get("reasons") or [])],
+                        "reasons": list(url_eval.get("reasons", [])),
                     }
                 )
 
