@@ -1,7 +1,27 @@
 import re
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
-SUSPICIOUS_WORDS = [
+DOMAIN_SUSPICIOUS_WORDS = [
+    "login",
+    "verify",
+    "update",
+    "secure",
+    "security",
+    "account",
+    "password",
+    "confirm",
+    "signin",
+    "alert",
+    "support",
+    "billing",
+    "invoice",
+    "payment",
+    "bank",
+    "wallet",
+    "otp",
+]
+
+PATH_SUSPICIOUS_WORDS = [
     "login",
     "verify",
     "update",
@@ -10,7 +30,29 @@ SUSPICIOUS_WORDS = [
     "password",
     "confirm",
     "signin",
+    "reset",
+    "otp",
+    "code",
+    "bank",
+    "wallet",
+    "billing",
+    "invoice",
+    "payment",
+    "gift",
+    "prize",
+    "reward",
+    "suspend",
+    "suspended",
+    "unlock",
+    "recover",
+    "urgent",
+    "alert",
 ]
+
+EXPLICIT_PHISHING_TOKENS = {
+    "phish",
+    "phishing",
+}
 
 URL_SHORTENERS = {
     "bit.ly",
@@ -26,6 +68,7 @@ RISKY_TLDS = {
     "xyz",
     "top",
     "icu",
+    "site",
     "click",
     "live",
     "tk",
@@ -38,11 +81,25 @@ _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 BRAND_ALLOWLIST = {
     # If a domain contains these brand strings but isn't an official domain suffix, add extra risk.
     "paypal": {"paypal.com", "paypal.me"},
+    "google": {"google.com", "google.co.uk", "google.ae", "googleusercontent.com", "googleapis.com", "g.co"},
+    "microsoft": {"microsoft.com", "live.com", "outlook.com"},
+    "apple": {"apple.com", "icloud.com"},
+    "amazon": {"amazon.com", "amazon.co.uk", "amazon.ae"},
+    "netflix": {"netflix.com"},
 }
 
 
 def _clamp(n: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, n))
+
+
+def _token_match(text: str, token: str) -> bool:
+    if not text or not token:
+        return False
+    # Full-token match when possible; fallback to substring for short tokens.
+    if len(token) <= 3:
+        return token in text
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text))
 
 
 def check_url(raw_url: str):
@@ -97,13 +154,22 @@ def check_url(raw_url: str):
 
     # Scheme/security
     if (parsed.scheme or "").lower() != "https":
-        risk += 12
+        risk += 14
         reasons.append({"code": "NOT_HTTPS"})
 
     # Common obfuscation tricks
     if "@" in (parsed.netloc or ""):
-        risk += 30
+        risk += 35
         reasons.append({"code": "HAS_AT_SYMBOL"})
+
+    port = parsed.port
+    if port not in (None, 80, 443):
+        risk += 12
+        reasons.append({"code": "NON_STANDARD_PORT", "value": str(port)})
+
+    if normalized.count("%") >= 3:
+        risk += 12
+        reasons.append({"code": "ENCODED_OBFUSCATION"})
 
     if _IPV4_RE.match(domain):
         risk += 45
@@ -121,38 +187,71 @@ def check_url(raw_url: str):
 
     hyphen_count = domain.count("-")
     if hyphen_count >= 3:
-        risk += 12
+        risk += 15
         reasons.append({"code": "MANY_HYPHENS", "value": str(hyphen_count)})
 
     # Length-based signals
-    if len(normalized) >= 85:
-        risk += 10
+    if len(normalized) >= 100:
+        risk += 15
+        reasons.append({"code": "LONG_URL", "value": str(len(normalized))})
+    elif len(normalized) >= 75:
+        risk += 8
         reasons.append({"code": "LONG_URL", "value": str(len(normalized))})
 
     # TLD risk (very rough heuristic)
     parts = domain.split(".")
     tld = parts[-1] if len(parts) > 1 else ""
     if tld and tld in RISKY_TLDS:
-        risk += 12
+        risk += 14
         reasons.append({"code": "RISKY_TLD", "value": tld})
 
     # URL shorteners hide destination
     if domain in URL_SHORTENERS:
-        risk += 25
+        risk += 30
         reasons.append({"code": "URL_SHORTENER"})
 
     # Keyword match in domain
-    keyword_hits = []
-    for word in SUSPICIOUS_WORDS:
+    domain_keyword_hits = []
+    for word in DOMAIN_SUSPICIOUS_WORDS:
         if word in domain:
-            keyword_hits.append(word)
-            risk += 14
+            domain_keyword_hits.append(word)
             reasons.append({"code": "SUSPICIOUS_KEYWORD", "value": word})
 
-    if len(keyword_hits) >= 2:
+    if domain_keyword_hits:
+        risk += min(48, 12 * len(domain_keyword_hits))
+
+    if len(domain_keyword_hits) >= 2:
         # Multiple sensitive keywords in one domain is a strong phishing signal.
-        risk += 15
-        reasons.append({"code": "MULTIPLE_SUSPICIOUS_KEYWORDS", "value": str(len(keyword_hits))})
+        risk += 18
+        reasons.append({"code": "MULTIPLE_SUSPICIOUS_KEYWORDS", "value": str(len(domain_keyword_hits))})
+
+    path_query = " ".join(
+        [
+            unquote(parsed.path or ""),
+            unquote(parsed.params or ""),
+            unquote(parsed.query or ""),
+            unquote(parsed.fragment or ""),
+        ]
+    ).lower()
+
+    path_keyword_hits = []
+    for word in PATH_SUSPICIOUS_WORDS:
+        if _token_match(path_query, word):
+            path_keyword_hits.append(word)
+            reasons.append({"code": "SUSPICIOUS_PATH_KEYWORD", "value": word})
+
+    if path_keyword_hits:
+        risk += min(45, 15 * len(path_keyword_hits))
+
+    if len(path_keyword_hits) >= 2:
+        risk += 12
+        reasons.append(
+            {"code": "MULTIPLE_SUSPICIOUS_PATH_KEYWORDS", "value": str(len(path_keyword_hits))}
+        )
+
+    if any(token in domain or token in path_query for token in EXPLICIT_PHISHING_TOKENS):
+        risk += 60
+        reasons.append({"code": "EXPLICIT_PHISHING_TERM"})
 
     # Brand impersonation (very small allowlist; educational heuristic).
     for brand, allowed_suffixes in BRAND_ALLOWLIST.items():

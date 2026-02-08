@@ -256,6 +256,8 @@ URL_REASON_TEMPLATES = {
         "INVALID_URL": "Invalid URL format.",
         "NOT_HTTPS": "Not using HTTPS (encrypted connection).",
         "HAS_AT_SYMBOL": "Contains '@' in the address (can hide the real destination).",
+        "NON_STANDARD_PORT": "Uses a non-standard port: {value}",
+        "ENCODED_OBFUSCATION": "Contains heavy URL encoding (possible obfuscation).",
         "IP_ADDRESS_HOST": "Uses an IP address instead of a domain name.",
         "PUNYCODE_DOMAIN": "Punycode domain (possible look-alike domain).",
         "TOO_MANY_SUBDOMAINS": "Too many subdomains ({value}).",
@@ -265,6 +267,9 @@ URL_REASON_TEMPLATES = {
         "URL_SHORTENER": "URL shortener hides the destination.",
         "SUSPICIOUS_KEYWORD": "Domain contains suspicious keyword: {value}",
         "MULTIPLE_SUSPICIOUS_KEYWORDS": "Multiple suspicious keywords in domain ({value}).",
+        "SUSPICIOUS_PATH_KEYWORD": "Path/query contains suspicious keyword: {value}",
+        "MULTIPLE_SUSPICIOUS_PATH_KEYWORDS": "Multiple suspicious keywords in path/query ({value}).",
+        "EXPLICIT_PHISHING_TERM": "Explicit phishing term detected in URL.",
         "BRAND_IMPERSONATION": "Brand name used in domain (possible impersonation): {value}",
         "NO_MAJOR_FLAGS": "No major red flags detected.",
     },
@@ -273,6 +278,8 @@ URL_REASON_TEMPLATES = {
         "INVALID_URL": "صيغة الرابط غير صحيحة.",
         "NOT_HTTPS": "لا يستخدم HTTPS (اتصال غير مُشفّر).",
         "HAS_AT_SYMBOL": "يحتوي على الرمز @ (قد يُخفي الوجهة الحقيقية).",
+        "NON_STANDARD_PORT": "يستخدم منفذًا غير معتاد: {value}",
+        "ENCODED_OBFUSCATION": "يحتوي على ترميز URL كبير (قد يكون تمويهًا).",
         "IP_ADDRESS_HOST": "يستخدم عنوان IP بدلًا من اسم نطاق.",
         "PUNYCODE_DOMAIN": "نطاق Punycode (قد يكون نطاقًا مُشابِهًا).",
         "TOO_MANY_SUBDOMAINS": "عدد كبير من النطاقات الفرعية ({value}).",
@@ -282,6 +289,9 @@ URL_REASON_TEMPLATES = {
         "URL_SHORTENER": "رابط مختصر يُخفي الوجهة.",
         "SUSPICIOUS_KEYWORD": "يحتوي النطاق على كلمة مشبوهة: {value}",
         "MULTIPLE_SUSPICIOUS_KEYWORDS": "وجود عدة كلمات مشبوهة في النطاق ({value}).",
+        "SUSPICIOUS_PATH_KEYWORD": "يحتوي مسار/استعلام الرابط على كلمة مشبوهة: {value}",
+        "MULTIPLE_SUSPICIOUS_PATH_KEYWORDS": "وجود عدة كلمات مشبوهة في مسار/استعلام الرابط ({value}).",
+        "EXPLICIT_PHISHING_TERM": "تم العثور على مصطلح تصيّد صريح داخل الرابط.",
         "BRAND_IMPERSONATION": "يحتوي النطاق على اسم علامة تجارية وقد يكون انتحالًا: {value}",
         "NO_MAJOR_FLAGS": "لا توجد مؤشرات كبيرة على الخطر.",
     },
@@ -305,7 +315,7 @@ def _url_reason_text(reason: dict, lang: str) -> str:
     value = (reason or {}).get("value", "")
 
     templates = URL_REASON_TEMPLATES.get(lang, URL_REASON_TEMPLATES["en"])
-    template = templates.get(code, code or "")
+    template = templates.get(code) or URL_REASON_TEMPLATES["en"].get(code, code or "")
     try:
         return template.format(value=value)
     except Exception:

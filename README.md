@@ -29,6 +29,10 @@ python train.py
 python export_offline_model.py
 ```
 
+`train.py` now loads and merges both datasets automatically:
+- `messages.csv` (`text`,`label`)
+- `spam/spam.csv` (`v1`,`v2` with `ham/spam`)
+
 Optional: TensorFlow model (experiment / ensemble):
 
 ```powershell

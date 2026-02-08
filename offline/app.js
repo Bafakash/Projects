@@ -300,7 +300,27 @@
     "URL looks safe": "يبدو الرابط آمنًا"
   };
 
-  const SUSPICIOUS_WORDS = [
+  const DOMAIN_SUSPICIOUS_WORDS = [
+    "login",
+    "verify",
+    "update",
+    "secure",
+    "security",
+    "account",
+    "password",
+    "confirm",
+    "signin",
+    "alert",
+    "support",
+    "billing",
+    "invoice",
+    "payment",
+    "bank",
+    "wallet",
+    "otp"
+  ];
+
+  const PATH_SUSPICIOUS_WORDS = [
     "login",
     "verify",
     "update",
@@ -308,14 +328,38 @@
     "account",
     "password",
     "confirm",
-    "signin"
+    "signin",
+    "reset",
+    "otp",
+    "code",
+    "bank",
+    "wallet",
+    "billing",
+    "invoice",
+    "payment",
+    "gift",
+    "prize",
+    "reward",
+    "suspend",
+    "suspended",
+    "unlock",
+    "recover",
+    "urgent",
+    "alert"
   ];
 
+  const EXPLICIT_PHISHING_TOKENS = new Set(["phish", "phishing"]);
+
   const URL_SHORTENERS = new Set(["bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "cutt.ly", "rebrand.ly"]);
-  const RISKY_TLDS = new Set(["xyz", "top", "icu", "click", "live", "tk", "monster", "work"]);
+  const RISKY_TLDS = new Set(["xyz", "top", "icu", "site", "click", "live", "tk", "monster", "work"]);
   const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
   const BRAND_ALLOWLIST = {
-    paypal: ["paypal.com", "paypal.me"]
+    paypal: ["paypal.com", "paypal.me"],
+    google: ["google.com", "google.co.uk", "google.ae", "googleusercontent.com", "googleapis.com", "g.co"],
+    microsoft: ["microsoft.com", "live.com", "outlook.com"],
+    apple: ["apple.com", "icloud.com"],
+    amazon: ["amazon.com", "amazon.co.uk", "amazon.ae"],
+    netflix: ["netflix.com"]
   };
 
   function round2(n) {
@@ -355,6 +399,8 @@
       INVALID_URL: "Invalid URL format.",
       NOT_HTTPS: "Not using HTTPS (encrypted connection).",
       HAS_AT_SYMBOL: "Contains '@' in the address (can hide the real destination).",
+      NON_STANDARD_PORT: "Uses a non-standard port: {value}",
+      ENCODED_OBFUSCATION: "Contains heavy URL encoding (possible obfuscation).",
       IP_ADDRESS_HOST: "Uses an IP address instead of a domain name.",
       PUNYCODE_DOMAIN: "Punycode domain (possible look-alike domain).",
       TOO_MANY_SUBDOMAINS: "Too many subdomains ({value}).",
@@ -364,6 +410,9 @@
       URL_SHORTENER: "URL shortener hides the destination.",
       SUSPICIOUS_KEYWORD: "Domain contains suspicious keyword: {value}",
       MULTIPLE_SUSPICIOUS_KEYWORDS: "Multiple suspicious keywords in domain ({value}).",
+      SUSPICIOUS_PATH_KEYWORD: "Path/query contains suspicious keyword: {value}",
+      MULTIPLE_SUSPICIOUS_PATH_KEYWORDS: "Multiple suspicious keywords in path/query ({value}).",
+      EXPLICIT_PHISHING_TERM: "Explicit phishing term detected in URL.",
       BRAND_IMPERSONATION: "Brand name used in domain (possible impersonation): {value}",
       NO_MAJOR_FLAGS: "No major red flags detected."
     },
@@ -391,7 +440,7 @@
     const code = r.code || "";
     const value = r.value || "";
     const templates = URL_REASON_TEMPLATES[lang] || URL_REASON_TEMPLATES.en;
-    const template = templates[code] || code;
+    const template = templates[code] || URL_REASON_TEMPLATES.en[code] || code;
     return String(template).replace("{value}", String(value));
   }
 
@@ -463,6 +512,23 @@
     return urls;
   }
 
+  function tokenMatch(text, token) {
+    const hay = String(text || "");
+    const needle = String(token || "");
+    if (!hay || !needle) return false;
+    if (needle.length <= 3) return hay.includes(needle);
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i").test(hay);
+  }
+
+  function safeDecode(value) {
+    try {
+      return decodeURIComponent(String(value || ""));
+    } catch {
+      return String(value || "");
+    }
+  }
+
   function checkUrl(rawUrl, lang) {
     const uiLang = lang === "ar" ? "ar" : "en";
     let url = String(rawUrl || "").trim();
@@ -508,14 +574,25 @@
     let risk = 0;
 
     if (parsed.protocol !== "https:") {
-      risk += 12;
+      risk += 14;
       reasons.push({ code: "NOT_HTTPS" });
     }
 
     const afterScheme = normalized.split("//")[1] || "";
     if (afterScheme.includes("@")) {
-      risk += 30;
+      risk += 35;
       reasons.push({ code: "HAS_AT_SYMBOL" });
+    }
+
+    const port = parsed.port ? Number(parsed.port) : null;
+    if (port !== null && port !== 80 && port !== 443) {
+      risk += 12;
+      reasons.push({ code: "NON_STANDARD_PORT", value: String(port) });
+    }
+
+    if ((normalized.match(/%/g) || []).length >= 3) {
+      risk += 12;
+      reasons.push({ code: "ENCODED_OBFUSCATION" });
     }
 
     if (IPV4_RE.test(domain)) {
@@ -536,40 +613,84 @@
 
     const hyphenCount = (domain.match(/-/g) || []).length;
     if (hyphenCount >= 3) {
-      risk += 12;
+      risk += 15;
       reasons.push({ code: "MANY_HYPHENS", value: String(hyphenCount) });
     }
 
-    if (normalized.length >= 85) {
-      risk += 10;
+    if (normalized.length >= 100) {
+      risk += 15;
+      reasons.push({ code: "LONG_URL", value: String(normalized.length) });
+    } else if (normalized.length >= 75) {
+      risk += 8;
       reasons.push({ code: "LONG_URL", value: String(normalized.length) });
     }
 
     const parts = domain.split(".");
     const tld = parts.length > 1 ? parts[parts.length - 1] : "";
     if (tld && RISKY_TLDS.has(tld)) {
-      risk += 12;
+      risk += 14;
       reasons.push({ code: "RISKY_TLD", value: tld });
     }
 
     if (URL_SHORTENERS.has(domain)) {
-      risk += 25;
+      risk += 30;
       reasons.push({ code: "URL_SHORTENER" });
     }
 
-    let keywordHits = 0;
-    for (let i = 0; i < SUSPICIOUS_WORDS.length; i++) {
-      const w = SUSPICIOUS_WORDS[i];
+    const domainKeywordHits = [];
+    for (let i = 0; i < DOMAIN_SUSPICIOUS_WORDS.length; i++) {
+      const w = DOMAIN_SUSPICIOUS_WORDS[i];
       if (w && domain.includes(w)) {
-        keywordHits += 1;
-        risk += 14;
+        domainKeywordHits.push(w);
         reasons.push({ code: "SUSPICIOUS_KEYWORD", value: w });
       }
     }
 
-    if (keywordHits >= 2) {
-      risk += 15;
-      reasons.push({ code: "MULTIPLE_SUSPICIOUS_KEYWORDS", value: String(keywordHits) });
+    if (domainKeywordHits.length) {
+      risk += Math.min(48, 12 * domainKeywordHits.length);
+    }
+
+    if (domainKeywordHits.length >= 2) {
+      risk += 18;
+      reasons.push({ code: "MULTIPLE_SUSPICIOUS_KEYWORDS", value: String(domainKeywordHits.length) });
+    }
+
+    const pathQuery = [
+      safeDecode(parsed.pathname),
+      safeDecode(parsed.search),
+      safeDecode(parsed.hash)
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    const pathKeywordHits = [];
+    for (let i = 0; i < PATH_SUSPICIOUS_WORDS.length; i++) {
+      const w = PATH_SUSPICIOUS_WORDS[i];
+      if (tokenMatch(pathQuery, w)) {
+        pathKeywordHits.push(w);
+        reasons.push({ code: "SUSPICIOUS_PATH_KEYWORD", value: w });
+      }
+    }
+
+    if (pathKeywordHits.length) {
+      risk += Math.min(45, 15 * pathKeywordHits.length);
+    }
+
+    if (pathKeywordHits.length >= 2) {
+      risk += 12;
+      reasons.push({ code: "MULTIPLE_SUSPICIOUS_PATH_KEYWORDS", value: String(pathKeywordHits.length) });
+    }
+
+    let hasExplicitPhishing = false;
+    for (const token of EXPLICIT_PHISHING_TOKENS) {
+      if (domain.includes(token) || pathQuery.includes(token)) {
+        hasExplicitPhishing = true;
+        break;
+      }
+    }
+    if (hasExplicitPhishing) {
+      risk += 60;
+      reasons.push({ code: "EXPLICIT_PHISHING_TERM" });
     }
 
     // Brand impersonation (tiny allowlist; educational heuristic).
