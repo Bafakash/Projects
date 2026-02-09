@@ -392,6 +392,8 @@ URL_REASON_TEMPLATES = {
         "ENCODED_OBFUSCATION": "Contains heavy URL encoding (possible obfuscation).",
         "IP_ADDRESS_HOST": "Uses an IP address instead of a domain name.",
         "PUNYCODE_DOMAIN": "Punycode domain (possible look-alike domain).",
+        "HIGH_ABUSE_HOSTING_SUBDOMAIN": "Subdomain hosted on a commonly abused free-hosting domain: {value}",
+        "RANDOM_LOOKING_SUBDOMAIN": "Subdomain appears random/generated: {value}",
         "TOO_MANY_SUBDOMAINS": "Too many subdomains ({value}).",
         "MANY_HYPHENS": "Many hyphens in the domain ({value}).",
         "LONG_URL": "Very long URL ({value} characters).",
@@ -417,6 +419,8 @@ URL_REASON_TEMPLATES = {
         "ENCODED_OBFUSCATION": "يحتوي على ترميز URL كبير (قد يكون تمويهًا).",
         "IP_ADDRESS_HOST": "يستخدم عنوان IP بدلًا من اسم نطاق.",
         "PUNYCODE_DOMAIN": "نطاق Punycode (قد يكون نطاقًا مُشابِهًا).",
+        "HIGH_ABUSE_HOSTING_SUBDOMAIN": "نطاق فرعي مستضاف على خدمة استضافة مجانية شائعة في الهجمات: {value}",
+        "RANDOM_LOOKING_SUBDOMAIN": "النطاق الفرعي يبدو عشوائيًا/مولدًا آليًا: {value}",
         "TOO_MANY_SUBDOMAINS": "عدد كبير من النطاقات الفرعية ({value}).",
         "MANY_HYPHENS": "يوجد عدد كبير من الشرطات في النطاق ({value}).",
         "LONG_URL": "الرابط طويل جدًا ({value} حرفًا).",
@@ -618,11 +622,16 @@ def _evaluate_url_candidate(candidate: str, lang: str, ui: dict) -> dict:
     ensemble_pred = _predict_text_ensemble(cleaned_url) if cleaned_url else {"prob_unsafe": 0.0, "model_probs": {}}
     ml_risk = _clamp(float(ensemble_pred.get("prob_unsafe", 0.0)) * 100.0)
 
-    # Keep heuristics as anchor but let NLP URL knowledge raise clearly risky links.
+    # Blend URL heuristics + NLP, but never allow very high NLP phishing scores to stay "safe".
     if ml_risk >= RISK_CAUTION_MIN:
-        combined_risk = max(heuristic_risk, heuristic_risk * (1.0 - 0.35) + ml_risk * 0.35)
+        combined_risk = max(heuristic_risk, heuristic_risk * 0.45 + ml_risk * 0.55)
     else:
         combined_risk = max(heuristic_risk, ml_risk * 0.4)
+
+    if ml_risk >= 97.0:
+        combined_risk = max(combined_risk, 58.0)
+    if ml_risk >= 99.0 and heuristic_risk >= 20.0:
+        combined_risk = max(combined_risk, 82.0)
 
     combined_risk = _clamp(combined_risk, 0.0, 100.0)
     result_class = _risk_class(combined_risk)
@@ -638,8 +647,12 @@ def _evaluate_url_candidate(candidate: str, lang: str, ui: dict) -> dict:
     reasons = [_url_reason_text(r, lang) for r in (report.get("reasons") or [])]
     if lang == "ar":
         reasons.append(f"احتمال الخطورة عبر نموذج URL/NLP: {round(ml_risk, 2)}%")
+        if ml_risk >= 97.0:
+            reasons.append("نموذج URL/NLP أعطى درجة عالية جدًا، لذلك تم رفع التصنيف على الأقل إلى مشبوه.")
     else:
         reasons.append(f"URL NLP phishing probability: {round(ml_risk, 2)}%")
+        if ml_risk >= 97.0:
+            reasons.append("URL NLP model returned a very high phishing score, so this was elevated to at least Suspicious.")
 
     model_breakdown = _format_model_breakdown(ensemble_pred.get("model_probs", {}), lang)
     if model_breakdown:

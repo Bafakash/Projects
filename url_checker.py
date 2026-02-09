@@ -1,3 +1,4 @@
+import math
 import re
 from urllib.parse import unquote, urlparse
 
@@ -108,6 +109,12 @@ BRAND_ALLOWLIST = {
     "netflix": {"netflix.com"},
 }
 
+HIGH_ABUSE_HOSTING_SUFFIXES = {
+    "webwave.dev",
+    "weeblysite.com",
+    "getresponsesite.com",
+}
+
 AUTH_TERMS = {
     "login",
     "signin",
@@ -143,6 +150,39 @@ def _token_match(text: str, token: str) -> bool:
     if len(token) <= 3:
         return token in text
     return bool(re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text))
+
+
+def _estimate_entropy(value: str) -> float:
+    s = str(value or "")
+    if not s:
+        return 0.0
+    freq = {}
+    for ch in s:
+        freq[ch] = freq.get(ch, 0) + 1
+    n = float(len(s))
+    ent = 0.0
+    for cnt in freq.values():
+        p = cnt / n
+        ent -= p * math.log2(p)
+    return ent
+
+
+def _looks_random_label(label: str) -> bool:
+    s = re.sub(r"[^a-z0-9]", "", str(label or "").lower())
+    if len(s) < 6:
+        return False
+
+    has_digit = any(ch.isdigit() for ch in s)
+    vowel_count = sum(1 for ch in s if ch in {"a", "e", "i", "o", "u"})
+    vowel_ratio = vowel_count / float(len(s))
+    entropy = _estimate_entropy(s)
+
+    # Catch generated-looking labels such as kq0hgp, x8d3kq1, etc.
+    if has_digit and entropy >= 2.2:
+        return True
+    if entropy >= 2.8 and vowel_ratio <= 0.25:
+        return True
+    return False
 
 
 def check_url(raw_url: str):
@@ -221,6 +261,28 @@ def check_url(raw_url: str):
     if domain.startswith("xn--") or ".xn--" in domain:
         risk += 25
         reasons.append({"code": "PUNYCODE_DOMAIN"})
+
+    matched_hosting_suffix = ""
+    hosting_subdomain = ""
+    for suffix in HIGH_ABUSE_HOSTING_SUFFIXES:
+        if domain == suffix:
+            matched_hosting_suffix = suffix
+            hosting_subdomain = ""
+            break
+        if domain.endswith("." + suffix):
+            matched_hosting_suffix = suffix
+            hosting_subdomain = domain[: -(len(suffix) + 1)]
+            break
+
+    if matched_hosting_suffix and hosting_subdomain:
+        risk += 34
+        reasons.append({"code": "HIGH_ABUSE_HOSTING_SUBDOMAIN", "value": matched_hosting_suffix})
+
+        labels = [x for x in hosting_subdomain.split(".") if x]
+        random_like = next((lbl for lbl in labels if _looks_random_label(lbl)), "")
+        if random_like:
+            risk += 38
+            reasons.append({"code": "RANDOM_LOOKING_SUBDOMAIN", "value": random_like})
 
     # Suspicious patterns in host
     dot_count = domain.count(".")

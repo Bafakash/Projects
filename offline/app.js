@@ -529,6 +529,7 @@
     amazon: ["amazon.com", "amazon.co.uk", "amazon.ae"],
     netflix: ["netflix.com"]
   };
+  const HIGH_ABUSE_HOSTING_SUFFIXES = new Set(["webwave.dev", "weeblysite.com", "getresponsesite.com"]);
 
   const AUTH_TERMS = new Set([
     "login",
@@ -583,6 +584,9 @@
       ENCODED_OBFUSCATION: "Contains heavy URL encoding (possible obfuscation).",
       IP_ADDRESS_HOST: "Uses an IP address instead of a domain name.",
       PUNYCODE_DOMAIN: "Punycode domain (possible look-alike domain).",
+      HIGH_ABUSE_HOSTING_SUBDOMAIN:
+        "Subdomain hosted on a commonly abused free-hosting domain: {value}",
+      RANDOM_LOOKING_SUBDOMAIN: "Subdomain appears random/generated: {value}",
       TOO_MANY_SUBDOMAINS: "Too many subdomains ({value}).",
       MANY_HYPHENS: "Many hyphens in the domain ({value}).",
       LONG_URL: "Very long URL ({value} characters).",
@@ -606,6 +610,9 @@
       HAS_AT_SYMBOL: "يحتوي على الرمز @ (قد يُخفي الوجهة الحقيقية).",
       IP_ADDRESS_HOST: "يستخدم عنوان IP بدلًا من اسم نطاق.",
       PUNYCODE_DOMAIN: "نطاق Punycode (قد يكون نطاقًا مُشابِهًا).",
+      HIGH_ABUSE_HOSTING_SUBDOMAIN:
+        "نطاق فرعي مستضاف على خدمة استضافة مجانية شائعة في الهجمات: {value}",
+      RANDOM_LOOKING_SUBDOMAIN: "النطاق الفرعي يبدو عشوائيًا/مولدًا آليًا: {value}",
       TOO_MANY_SUBDOMAINS: "عدد كبير من النطاقات الفرعية ({value}).",
       MANY_HYPHENS: "يوجد عدد كبير من الشرطات في النطاق ({value}).",
       LONG_URL: "الرابط طويل جدًا ({value} حرفًا).",
@@ -707,6 +714,37 @@
     return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i").test(hay);
   }
 
+  function estimateEntropy(value) {
+    const s = String(value || "");
+    if (!s) return 0;
+    const freq = new Map();
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      freq.set(ch, (freq.get(ch) || 0) + 1);
+    }
+    const n = s.length;
+    let ent = 0;
+    for (const count of freq.values()) {
+      const p = count / n;
+      ent -= p * Math.log2(p);
+    }
+    return ent;
+  }
+
+  function looksRandomLabel(label) {
+    const s = String(label || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+    if (s.length < 6) return false;
+    const hasDigit = /\d/.test(s);
+    const vowelCount = (s.match(/[aeiou]/g) || []).length;
+    const vowelRatio = vowelCount / s.length;
+    const entropy = estimateEntropy(s);
+    if (hasDigit && entropy >= 2.2) return true;
+    if (entropy >= 2.8 && vowelRatio <= 0.25) return true;
+    return false;
+  }
+
   function safeDecode(value) {
     try {
       return decodeURIComponent(String(value || ""));
@@ -789,6 +827,32 @@
     if (domain.startsWith("xn--") || domain.includes(".xn--")) {
       risk += 25;
       reasons.push({ code: "PUNYCODE_DOMAIN" });
+    }
+
+    let matchedHostingSuffix = "";
+    let hostingSubdomain = "";
+    for (const suffix of HIGH_ABUSE_HOSTING_SUFFIXES) {
+      if (domain === suffix) {
+        matchedHostingSuffix = suffix;
+        hostingSubdomain = "";
+        break;
+      }
+      if (domain.endsWith("." + suffix)) {
+        matchedHostingSuffix = suffix;
+        hostingSubdomain = domain.slice(0, -(suffix.length + 1));
+        break;
+      }
+    }
+    if (matchedHostingSuffix && hostingSubdomain) {
+      risk += 34;
+      reasons.push({ code: "HIGH_ABUSE_HOSTING_SUBDOMAIN", value: matchedHostingSuffix });
+
+      const labels = hostingSubdomain.split(".").filter(Boolean);
+      const randomLike = labels.find((lbl) => looksRandomLabel(lbl));
+      if (randomLike) {
+        risk += 38;
+        reasons.push({ code: "RANDOM_LOOKING_SUBDOMAIN", value: randomLike });
+      }
     }
 
     const dotCount = (domain.match(/\./g) || []).length;
@@ -1216,9 +1280,11 @@
       const mlRisk = urlNlpRisk(candidate);
       const blendedRisk =
         mlRisk >= RISK_CAUTION_MIN
-          ? Math.max(Number(rep.risk || 0), Number(rep.risk || 0) * 0.65 + mlRisk * 0.35)
+          ? Math.max(Number(rep.risk || 0), Number(rep.risk || 0) * 0.45 + mlRisk * 0.55)
           : Math.max(Number(rep.risk || 0), mlRisk * 0.4);
-      const confidence = round2(clamp(blendedRisk, 0, 100));
+      let confidence = round2(clamp(blendedRisk, 0, 100));
+      if (mlRisk >= 97) confidence = Math.max(confidence, 58);
+      if (mlRisk >= 99 && Number(rep.risk || 0) >= 20) confidence = Math.max(confidence, 82);
       const resultClass = riskClass(confidence);
       let messageKey = rep.messageKey;
       if (resultClass === "unsafe") messageKey = "High risk URL";
@@ -1231,6 +1297,13 @@
           ? `احتمال الخطورة عبر نموذج URL/NLP: ${mlRisk}%`
           : `URL NLP phishing probability: ${mlRisk}%`
       );
+      if (mlRisk >= 97) {
+        reasons.push(
+          lang === "ar"
+            ? "نموذج URL/NLP أعطى درجة عالية جدًا، لذلك تم رفع التصنيف على الأقل إلى مشبوه."
+            : "URL NLP model returned a very high phishing score, so this was elevated to at least Suspicious."
+        );
+      }
 
       return {
         kind: "url",
@@ -1266,9 +1339,11 @@
       const mlRisk = urlNlpRisk(candidate);
       const blendedRisk =
         mlRisk >= RISK_CAUTION_MIN
-          ? Math.max(Number(rep.risk || 0), Number(rep.risk || 0) * 0.65 + mlRisk * 0.35)
+          ? Math.max(Number(rep.risk || 0), Number(rep.risk || 0) * 0.45 + mlRisk * 0.55)
           : Math.max(Number(rep.risk || 0), mlRisk * 0.4);
-      const confidence = round2(clamp(blendedRisk, 0, 100));
+      let confidence = round2(clamp(blendedRisk, 0, 100));
+      if (mlRisk >= 97) confidence = Math.max(confidence, 58);
+      if (mlRisk >= 99 && Number(rep.risk || 0) >= 20) confidence = Math.max(confidence, 82);
       const resultClass = riskClass(confidence);
       urlRisks.push(Number(confidence || 0));
       if (resultClass === "unsafe") urlsUnsafe += 1;
@@ -1285,6 +1360,13 @@
           ? `احتمال الخطورة عبر نموذج URL/NLP: ${mlRisk}%`
           : `URL NLP phishing probability: ${mlRisk}%`
       );
+      if (mlRisk >= 97) {
+        reasons.push(
+          lang === "ar"
+            ? "نموذج URL/NLP أعطى درجة عالية جدًا، لذلك تم رفع التصنيف على الأقل إلى مشبوه."
+            : "URL NLP model returned a very high phishing score, so this was elevated to at least Suspicious."
+        );
+      }
 
       urlDetails.push({
         url: candidate,
