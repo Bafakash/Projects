@@ -45,6 +45,31 @@ It also saves:
 - `ensemble_models.pkl` (weighted ensemble bundle used by Flask app)
 - `training_report.json` (validation metrics and source stats)
 
+### Fork User: Generate `ensemble_models.pkl` Locally
+
+If your fork does not contain large URL datasets in git, place these two files in repo root:
+- `URL dataset.csv`
+- `Phishing URLs.csv`
+
+Then run one command:
+
+PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\generate_models.ps1
+```
+
+Git Bash:
+```bash
+bash ./scripts/generate_models.sh
+```
+
+This generates:
+- `ensemble_models.pkl`
+- `model.pkl`
+- `vectorizer.pkl`
+- `training_report.json`
+- `offline/model.js` + `offline/model.json` (unless skipped)
+
 Optional: TensorFlow model (experiment / ensemble):
 
 ```powershell
